@@ -1,0 +1,281 @@
+import numpy as np
+import scipy as scipy
+from numpy.random import uniform
+import scipy.stats
+import cv2
+
+
+
+#作用：确定浮点数字、数组、和numpy对象的显示形式。
+#超过阈值就缩写
+np.set_printoptions(threshold=12)
+#过小的结果会被压缩
+np.set_printoptions(suppress=True)
+
+
+#画图像
+def drawLines(img, points, r, g, b):
+    #同时绘制一条或多条曲线
+    cv2.polylines(img, [np.int32(points)], isClosed=False, color=(r, g, b))
+    #[np.int32(points)]是指点对集合
+    #isClose布尔型，True表示的是线段闭合，False表示的是仅保留线段
+    #color线段颜色，格式是（R,G,B）值
+
+
+def drawPosition(img,point,r,g,b):
+    cv2.rectangle(img,(np.int32(point[0])-5,np.int32(point[1])-5),(np.int32(point[0])+5,np.int32(point[1])+5),(r,g,b),-1)
+
+
+def drawCross(img, center, r, g, b):
+    d = 5
+    t = 2
+    #LINE_AA = cv2.LINE_AA if cv2.__version__[0] == '3' else cv2.CV_AA
+    # if cv2.__version__[0] == '3':
+    LINE_AA = cv2.LINE_AA
+    # else :
+    #     LINE_AA = cv2.CV_AA
+    color = (r, g, b)
+    ctrx = center[0, 0]
+    ctry = center[0, 1]
+    cv2.line(img, (ctrx - d, ctry - d), (ctrx + d, ctry + d), color, t, LINE_AA)
+    #img:图像，起点坐标，终点坐标，颜色，线的宽度   画出一条线
+    cv2.line(img, (ctrx + d, ctry - d), (ctrx - d, ctry + d), color, t, LINE_AA)
+
+
+#返回一个400行2列的随机数组
+def create_uniform_particles(x_range, y_range, N):
+    #np.empty创建一个N行2列的空数组
+    particles = np.empty((N, 2))
+    #确定第一列的400个随机数字
+    particles[:, 0] = uniform(x_range[0], x_range[1], size=N)
+    #uniform是随机在[x_range[0],x_range[1])中产生一个随机数
+    # size: 输出样本数目，为int或元组(tuple)类型，例如，size=(m,n,k), 则输出m*n*k个样本，缺省时输出1个实数
+    particles[:, 1] = uniform(y_range[0], y_range[1], size=N)
+    return particles
+
+
+
+def mouseCallback(event, x, y, flags, null):
+    #global在函数的内部对函数外部进行操作
+    global center
+    global trajectory
+    global previous_x
+    global previous_y
+    global zs
+
+    center = np.array([[x, y]])
+    #在竖直的方向上，进行数组的堆砌的操作
+    trajectory = np.vstack((trajectory, np.array([x, y])))
+    # noise=sensorSigma * np.random.randn(1,2) + sensorMu
+
+    if previous_x > 0:
+        heading = np.arctan2(np.array([y - previous_y]), np.array([previous_x - x]))
+        #np.arctan2返回的是一个在[-pi,pi]之间的一个角度
+        #Array of angles in radians, in the range [-pi, pi]. This is a scalar if both x1 and x2 are scalars.
+
+
+        if heading > 0:
+            heading = -(heading - np.pi)
+        else:
+            heading = -(np.pi + heading)
+
+        #robot和landmark之间的距离的变换
+        distance = np.linalg.norm(np.array([[previous_x, previous_y]]) - np.array([[x, y]]), axis=1)
+        #第一个参数是一个一维的矩阵，第二个axis=1，是指按照行向量进行处理，得出各个行向量的距离的大小
+
+        std = np.array([2, 4])
+        u = np.array([heading, distance])
+        #用于改变particle的值，使其分布符合正太函数的分布的形态进行相应的改变
+        predict(particles, u, std, dt=1.)
+       # zs = (np.linalg.norm(landmarks - center, axis=1) + (np.random.randn(NL) * sensor_std_err))
+        zs =(np.linalg.norm(landmarks - center, axis=1) + (np.random.poisson(NL) * sensor_std_err))
+        #在计算的过程中增加权重
+        update(particles, weights, z=zs, R=50, landmarks=landmarks)
+
+        indexes = systematic_resample(weights)
+        resample_from_index(particles, weights, indexes)
+
+    previous_x = x
+    previous_y = y
+
+
+
+
+
+def predict(particles, u, std, dt=1.,):
+    N = len(particles)
+    dist = (u[1] * dt) + (np.random.randn(N) * std[1])
+    #np.random.randn(N)产生一个一维的长为N的正太分布性的一维数组，std[1]=4
+    #dist =np.random.poisson(lam=u[1], size=N)
+    particles[:, 0] += np.cos(u[0]) * dist
+    particles[:, 1] += np.sin(u[0]) * dist
+
+#加上权值，输入的weight是一个N列的1的数组
+def update(particles, weights, z, R, landmarks):
+    weights.fill(1.)
+    for i, landmark in enumerate(landmarks):
+        distance = np.power((particles[:, 0] - landmark[0]) ** 2 + (particles[:, 1] - landmark[1]) ** 2, 0.5)
+        weights *= scipy.stats.norm(distance, R).pdf(z[i])
+        #weights *= scipy.stats.poisson(distance,R).cdf(z[i])
+
+    weights += 1.e-300  # avoid round-off to zero
+    #将权重的值进行归一化
+    weights /= sum(weights)
+
+
+def neff(weights):
+    return 1. / np.sum(np.square(weights))
+
+
+def systematic_resample(weights):
+    N = len(weights)
+    positions = (np.arange(N) + np.random.random()) / N
+    #np.arange(N)起点为0，终点为N，步长为1
+    #np.random.random()生成随机浮点数，取值范围：[0,1)
+
+    indexes = np.zeros(N, 'i')
+    cumulative_sum = np.cumsum(weights)
+    #将weights的一位数组中的各个位置上的数，等于其原来前面的数字之和，例如：原来是：1,2，3  变换之后是：1,3,6
+    i, j = 0, 0
+    while i < N and j < N:
+        if positions[i] < cumulative_sum[j]:
+            indexes[i] = j
+            i += 1
+        else:
+            j += 1
+    return indexes
+
+
+def estimate(particles, weights):
+    pos = particles[:, 0:1]
+    mean = np.average(pos, weights=weights, axis=0)
+    var = np.average((pos - mean) ** 2, weights=weights, axis=0)
+    return mean, var
+
+
+def resample_from_index(particles, weights, indexes):
+    particles[:] = particles[indexes]
+    weights[:] = weights[indexes]
+    weights /= np.sum(weights)
+
+
+
+def calculate_position(particles,weights):
+    n=len(weights)
+    x=0
+    y=0
+    i=0
+    while i< n:
+        x=x+particles[i][0]*weights[i]
+        y=y+particles[i][1]*weights[i]
+        i+=1
+    position=np.array([x,y])
+    return position
+
+def move_landmarks(landmarks):
+    global ik
+    global an
+    global nn
+    # for landmark in landmarks:
+    #     landmark[0]=landmark[0]+10*np.sin((np.pi*ik)/36)
+    #     landmark[1]=landmark[1]+10*np.cos((np.pi*ik)/36)
+    #     ik+=1
+    if(an==0):
+        for landmark in landmarks:
+            landmark[0]=landmark[0]+1
+            landmark[1]=landmark[1]+1
+        ik+=1
+        if(ik>=nn):
+            an=1
+    else:
+        for landmark in landmarks:
+            landmark[0]=landmark[0]-1
+            landmark[1]=landmark[1]-1
+        ik-=1
+        if(ik<=0):
+            an=0
+
+
+
+WIDTH = 800
+HEIGHT = 600
+WINDOW_NAME = "Particle Filter"
+ik =-6
+an = 0
+nn=30
+
+# sensorMu=0
+# sensorSigma=3
+
+sensor_std_err = 5
+
+
+#创造一个数组对象
+x_range = np.array([0, 800])
+y_range = np.array([0, 600])
+
+# Number of partciles
+N = 400
+#是固定的位置的点，用于进行测量
+landmarks = np.array([[144, 73], [410, 13], [336, 175], [718, 159], [178, 484], [665, 464]])
+
+
+center = np.array([[-10, -10]])
+#shape是指零数组的大小
+trajectory = np.zeros(shape=(0, 2))
+robot_pos = np.zeros(shape=(0, 2))
+previous_x = -1
+previous_y = -1
+DELAY_MSEC = 50
+
+
+NL = len(landmarks)
+particles = create_uniform_particles(x_range, y_range, N)#随机数组
+#N列的数组
+weights = np.array([1.0] * N)
+
+# Create a black image, a window and bind the function to window
+#定义一个三维数组
+img = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
+#800行，3列一共600组
+#namedWindow新建一个显示窗口。可以指定窗口的类型。
+cv2.namedWindow(WINDOW_NAME)
+#mouseCallback是自定义的鼠标的移动的轨迹（例如画出一个图形），windowname的作用是指在哪一个图形的中间进行相应的相应的过程
+
+cv2.setMouseCallback(WINDOW_NAME, mouseCallback)
+
+while (1):
+
+    cv2.imshow(WINDOW_NAME, img)
+    img = np.zeros((HEIGHT, WIDTH, 3), np.uint8)
+    #Robot Trajectory
+    drawLines(img, trajectory, 0, 255, 0)
+
+    drawCross(img, center, r=255, g=0, b=0)
+    #move_landmarks(landmarks)
+
+    # 绘画出landmark的点的位置
+    for landmark in landmarks:
+        cv2.circle(img, tuple(landmark), 10, (255, 0, 0), -1)
+
+    # draw_particles:
+    for particle in particles:
+        cv2.circle(img, tuple((int(particle[0]), int(particle[1]))), 1, (255, 255, 255), -1)
+
+    point=calculate_position(particles,weights)
+    #drawPosition(img,point,0,0,255)
+
+    if cv2.waitKey(DELAY_MSEC) & 0xFF == 27:
+        break
+
+    #标记注释
+    cv2.circle(img, (10, 10), 10, (255, 0, 0), -1)
+    cv2.circle(img, (10, 30), 3, (255, 255, 255), -1)
+    cv2.rectangle(img,(10,70),(20,80),(0,0,255),-1)
+    cv2.putText(img, "Landmarks", (30, 20), 1, 1.0, (255, 0, 0))
+    cv2.putText(img, "Particles", (30, 40), 1, 1.0, (255, 255, 255))
+    cv2.putText(img, "Robot Trajectory(Ground truth)", (30, 60), 1, 1.0, (0, 255, 0))
+    cv2.putText(img,"Robot Position", (30, 80), 1, 1.0, (0, 0, 255))
+    drawLines(img, np.array([[10, 55], [25, 55]]), 0, 255, 0)
+
+cv2.destroyAllWindows()
